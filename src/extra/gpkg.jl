@@ -131,7 +131,10 @@ function gpkgextract(db; layer, warn)
   attribs = setdiff(columns, [geomcolumn])
 
   # load feature table from database
-  gpkgtable = DBInterface.execute(db, "SELECT $(join(columns, ',')) FROM \"$tablename\";")
+  # column/table names must be escaped (e.g. quoted) because they may
+  # contain spaces or other characters that are not valid bare SQL identifiers
+  escapedcolumns = SQLite.esc_id.(string.(columns))
+  gpkgtable = DBInterface.execute(db, "SELECT $(join(escapedcolumns, ',')) FROM $(SQLite.esc_id(tablename));")
 
   # extract rows with Meshes.jl geometries
   map(Tables.rows(gpkgtable)) do row
