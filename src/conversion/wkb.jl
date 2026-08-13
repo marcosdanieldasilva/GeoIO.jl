@@ -16,21 +16,32 @@ function wkb2meshes(buff, crs)
 
   # SQL/MM Part 3 and SFSQL 1.2 use offsets to
   # indicate the presence of higher dimensional
-  # coordinates in a WKB geometry
+  # coordinates in a WKB geometry.
+  #
+  # `hasz` reflects what THIS geometry record actually declares in its type
+  # code, which is the authoritative source for the on-disk layout. It can
+  # disagree with `crs` (e.g. a Projected/EPSG CRS built from
+  # gpkg_geometry_columns metadata has no 3D variant): in that case we must
+  # still consume the Z bytes below to stay aligned with the rest of the
+  # record, even though the resulting point can't carry that Z value.
+  hasz = false
   if wkbtype ≥ 1001 && wkbtype ≤ 1007
     # 1000 (Z)
     wkbtype -= UInt32(1000)
+    hasz = true
   elseif wkbtype ≥ 2001 && wkbtype ≤ 2007
     # 2000 (M)
     wkbtype -= UInt32(2000)
   elseif wkbtype ≥ 3001 && wkbtype ≤ 3007
     # 3000 (ZM)
     wkbtype -= UInt32(3000)
+    hasz = true
   elseif wkbtype > 0x80000000
     # 99-402 was a short-lived extension to SFSQL 1.1
     # that used a high-bit flag to indicate the presence
     # of Z coordinates in a WKB geometry
     wkbtype -= 0x80000000
+    hasz = true
   elseif wkbtype > 0x40000000
     # The M coordinate value allows the application environment
     # to associate some measure with the point values
@@ -40,11 +51,11 @@ function wkb2meshes(buff, crs)
 
   # convert WKB geometry type to Meshes.jl type
   if wkbtype == 1
-    wkb2point(buff, crs, swapbytes)
+    wkb2point(buff, crs, swapbytes, hasz)
   elseif wkbtype == 2
-    wkb2chain(buff, crs, swapbytes)
+    wkb2chain(buff, crs, swapbytes, hasz)
   elseif wkbtype == 3
-    wkb2poly(buff, crs, swapbytes)
+    wkb2poly(buff, crs, swapbytes, hasz)
   elseif 4 ≤ wkbtype ≤ 7
     # do a recursive call to read inner geometries
     ngeoms = read(buff, UInt32)
@@ -55,13 +66,13 @@ function wkb2meshes(buff, crs)
   end
 end
 
-wkb2point(buff, crs, swapbytes) = Point(wkb2coords(buff, crs, swapbytes))
+wkb2point(buff, crs, swapbytes, hasz) = Point(wkb2coords(buff, crs, swapbytes, hasz))
 
-wkb2points(buff, npoints, crs, swapbytes) = [wkb2point(buff, crs, swapbytes) for _ in 1:npoints]
+wkb2points(buff, npoints, crs, swapbytes, hasz) = [wkb2point(buff, crs, swapbytes, hasz) for _ in 1:npoints]
 
-function wkb2chain(buff, crs, swapbytes)
+function wkb2chain(buff, crs, swapbytes, hasz)
   npoints = read(buff, UInt32)
-  points = wkb2points(buff, npoints, crs, swapbytes)
+  points = wkb2points(buff, npoints, crs, swapbytes, hasz)
   if first(points) == last(points)
     while first(points) == last(points) && length(points) ≥ 2
       pop!(points)
@@ -72,22 +83,35 @@ function wkb2chain(buff, crs, swapbytes)
   end
 end
 
-function wkb2poly(buff, crs, swapbytes)
+function wkb2poly(buff, crs, swapbytes, hasz)
   nrings = read(buff, UInt32)
-  rings = [wkb2chain(buff, crs, swapbytes) for _ in 1:nrings]
+  rings = [wkb2chain(buff, crs, swapbytes, hasz) for _ in 1:nrings]
   PolyArea(rings)
 end
 
-function wkb2coords(buff, crs, swapbytes)
-  xyz = ntuple(CoordRefSystems.ncoords(crs)) do _
+# Number of coordinates the CRS itself can represent (2 for LatLon/Projected/
+# Cartesian2D, 3 for LatLonAlt/Cartesian3D).
+_crsncoords(crs) = CoordRefSystems.ncoords(crs)
+
+function wkb2coords(buff, crs, swapbytes, hasz)
+  n = _crsncoords(crs)
+  xy = ntuple(min(n, 2)) do _
     swapbytes(read(buff, Float64))
   end
-  if crs <: LatLon
-    crs(xyz[2], xyz[1])
-  elseif crs <: LatLonAlt
-    crs(xyz[2], xyz[1], xyz[3])
+  z = if hasz
+    swapbytes(read(buff, Float64))
   else
-    crs(xyz...)
+    nothing
+  end
+
+  if crs <: LatLon
+    crs(xy[2], xy[1])
+  elseif crs <: LatLonAlt
+    crs(xy[2], xy[1], something(z, 0.0))
+  elseif n == 3
+    crs(xy[1], xy[2], something(z, 0.0))
+  else
+    crs(xy...)
   end
 end
 
